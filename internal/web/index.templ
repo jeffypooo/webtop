@@ -1,0 +1,37 @@
+package web
+
+import (
+	"fmt"
+	"github.com/jeffypooo/webtop/internal/metrics"
+)
+
+templ Index(interval string) {
+	<html>
+		<head>
+			<title>Metrics Dashboard</title>
+            <script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.8/dist/htmx.min.js" integrity="sha384-/TgkGk7p307TH7EXJDuUlgG3Ce1UVolAOFopFekQkkXihi5u/6OCvVKyz1W+idaz" crossorigin="anonymous"></script>
+            <script src="https://cdn.jsdelivr.net/npm/htmx-ext-sse@2.2.4" integrity="sha384-A986SAtodyH8eg8x8irJnYUk7i9inVQqYigD6qZ9evobksGNIXfeFvDwLSHcp31N" crossorigin="anonymous"></script>
+
+		</head>
+		<body hx-ext="sse">
+			<h1>System Metrics</h1>
+			<div id="metrics-container" sse-connect={ fmt.Sprintf("/api/metrics/sse?interval=%s", interval) } sse-swap="metrics">
+				<div>Loading metrics...</div>
+			</div>
+		</body>
+	</html>
+}
+
+templ MetricsDisplay(m metrics.Metrics) {
+	<div>
+		<h2>CPU Usage</h2>
+		<p>Usage: { fmt.Sprintf("%.2f", m.CpuUsage.UsagePct) }%</p>
+		
+		<h2>Memory Usage</h2>
+		<p>Used: { formatBytes(m.MemUsage.Used) }</p>
+		<p>Free: { formatBytes(m.MemUsage.Free) }</p>
+		<p>Total: { formatBytes(m.MemUsage.Total) }</p>
+		<p>Usage: { fmt.Sprintf("%.2f", m.MemUsage.UsagePct) }%</p>
+	</div>
+}
+
