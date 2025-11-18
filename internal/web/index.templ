@@ -11,7 +11,12 @@ templ Index(interval string) {
 			<title>Metrics Dashboard</title>
             <script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.8/dist/htmx.min.js" integrity="sha384-/TgkGk7p307TH7EXJDuUlgG3Ce1UVolAOFopFekQkkXihi5u/6OCvVKyz1W+idaz" crossorigin="anonymous"></script>
             <script src="https://cdn.jsdelivr.net/npm/htmx-ext-sse@2.2.4" integrity="sha384-A986SAtodyH8eg8x8irJnYUk7i9inVQqYigD6qZ9evobksGNIXfeFvDwLSHcp31N" crossorigin="anonymous"></script>
-
+            <style>
+                body { font-family: sans-serif; padding: 20px; }
+                table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+                th, td { text-align: left; padding: 8px; border-bottom: 1px solid #ddd; }
+                th { background-color: #f2f2f2; }
+            </style>
 		</head>
 		<body hx-ext="sse">
 			<div style="display: flex; justify-content: space-between; align-items: center;">
@@ -37,14 +42,40 @@ templ Index(interval string) {
 
 templ MetricsDisplay(m metrics.Metrics) {
 	<div>
-		<h2>CPU Usage</h2>
-		<p>Usage: { fmt.Sprintf("%.2f", m.CpuUsage.UsagePct) }%</p>
-		
-		<h2>Memory Usage</h2>
-		<p>Used: { formatBytes(m.MemUsage.Used) }</p>
-		<p>Free: { formatBytes(m.MemUsage.Free) }</p>
-		<p>Total: { formatBytes(m.MemUsage.Total) }</p>
-		<p>Usage: { fmt.Sprintf("%.2f", m.MemUsage.UsagePct) }%</p>
+		<div style="display: flex; gap: 20px;">
+			<div>
+				<h2>CPU Usage</h2>
+				<p>Usage: { fmt.Sprintf("%.2f", m.CpuUsage.UsagePct) }%</p>
+			</div>
+			<div>
+				<h2>Memory Usage</h2>
+				<p>Used: { formatBytes(m.MemUsage.Used) }</p>
+				<p>Free: { formatBytes(m.MemUsage.Free) }</p>
+				<p>Total: { formatBytes(m.MemUsage.Total) }</p>
+				<p>Usage: { fmt.Sprintf("%.2f", m.MemUsage.UsagePct) }%</p>
+			</div>
+		</div>
+
+		<h2>Top Processes</h2>
+		<table>
+			<thead>
+				<tr>
+					<th>PID</th>
+					<th>Name</th>
+					<th>CPU %</th>
+					<th>Memory</th>
+				</tr>
+			</thead>
+			<tbody>
+				for _, p := range m.Processes {
+					<tr>
+						<td>{ fmt.Sprintf("%d", p.Pid) }</td>
+						<td>{ p.Name }</td>
+						<td>{ fmt.Sprintf("%.1f", p.CpuPct) }</td>
+						<td>{ formatBytes(p.MemBytes) }</td>
+					</tr>
+				}
+			</tbody>
+		</table>
 	</div>
 }
-

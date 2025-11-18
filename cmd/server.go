@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/jeffypooo/webtop/internal/web"
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/mem"
+	"github.com/shirou/gopsutil/v4/process"
 )
 
 func main() {
@@ -42,7 +44,7 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	web.Index(interval).Render(r.Context(), w)
 }
 
-func getMetrics() (metrics.Metrics, error) {
+func getMetrics(procCache map[int32]*process.Process) (metrics.Metrics, error) {
 	cpuUsage, err := cpu.Percent(0, false)
 	if err != nil {
 		return metrics.Metrics{}, fmt.Errorf("error getting CPU usage: %w", err)
@@ -51,6 +53,66 @@ func getMetrics() (metrics.Metrics, error) {
 	if err != nil {
 		return metrics.Metrics{}, fmt.Errorf("error getting memory usage: %w", err)
 	}
+
+	// Process metrics
+	procs, err := process.Processes()
+	if err != nil {
+		return metrics.Metrics{}, fmt.Errorf("error getting processes: %w", err)
+	}
+
+	currentPids := make(map[int32]bool)
+	for _, p := range procs {
+		currentPids[p.Pid] = true
+		if _, ok := procCache[p.Pid]; !ok {
+			procCache[p.Pid] = p
+		}
+	}
+
+	// Cleanup dead processes
+	for pid := range procCache {
+		if !currentPids[pid] {
+			delete(procCache, pid)
+		}
+	}
+
+	var processes []metrics.Process
+	for _, p := range procCache {
+		// Use Percent(0) which calculates based on last call time
+		cpuPct, err := p.Percent(0)
+		if err != nil {
+			// Process might have died
+			continue
+		}
+
+		name, err := p.Name()
+		if err != nil {
+			name = "unknown"
+		}
+
+		memInfo, err := p.MemoryInfo()
+		var rss uint64
+		if err == nil {
+			rss = memInfo.RSS
+		}
+
+		processes = append(processes, metrics.Process{
+			Pid:      p.Pid,
+			Name:     name,
+			CpuPct:   cpuPct,
+			MemBytes: rss,
+		})
+	}
+
+	// Sort by CPU
+	sort.Slice(processes, func(i, j int) bool {
+		return processes[i].CpuPct > processes[j].CpuPct
+	})
+
+	// Top 10
+	if len(processes) > 10 {
+		processes = processes[:10]
+	}
+
 	return metrics.Metrics{
 		CpuUsage: metrics.CpuUsage{
 			UsagePct: cpuUsage[0],
@@ -61,6 +123,7 @@ func getMetrics() (metrics.Metrics, error) {
 			Total:    memUsage.Total,
 			UsagePct: float64(memUsage.Used) / float64(memUsage.Total) * 100,
 		},
+		Processes: processes,
 	}, nil
 }
 
@@ -102,9 +165,11 @@ func apiMetricsSSEHandler(w http.ResponseWriter, r *http.Request) {
 	// Handle client disconnect
 	ctx := r.Context()
 
+	procCache := make(map[int32]*process.Process)
+
 	// Send initial metrics
 	fmt.Println("Sending initial metrics")
-	sendMetricsUpdate(ctx, w, flusher)
+	sendMetricsUpdate(ctx, w, flusher, procCache)
 
 	// Stream metrics at the specified interval
 	for {
@@ -114,13 +179,13 @@ func apiMetricsSSEHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-ticker.C:
 			fmt.Println("Sending metrics update")
-			sendMetricsUpdate(ctx, w, flusher)
+			sendMetricsUpdate(ctx, w, flusher, procCache)
 		}
 	}
 }
 
-func sendMetricsUpdate(ctx context.Context, w io.Writer, flusher http.Flusher) {
-	m, err := getMetrics()
+func sendMetricsUpdate(ctx context.Context, w io.Writer, flusher http.Flusher, procCache map[int32]*process.Process) {
+	m, err := getMetrics(procCache)
 	if err != nil {
 		fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
 		flusher.Flush()

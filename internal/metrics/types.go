@@ -11,8 +11,15 @@ type MemUsage struct {
 	UsagePct float64 `json:"usage"`
 }
 
-type Metrics struct {
-	CpuUsage CpuUsage `json:"cpu"`
-	MemUsage MemUsage `json:"mem"`
+type Process struct {
+	Pid      int32   `json:"pid"`
+	Name     string  `json:"name"`
+	CpuPct   float64 `json:"cpu_pct"`
+	MemBytes uint64  `json:"mem_bytes"`
 }
 
+type Metrics struct {
+	CpuUsage  CpuUsage  `json:"cpu"`
+	MemUsage  MemUsage  `json:"mem"`
+	Processes []Process `json:"processes"`
+}
