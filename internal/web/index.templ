@@ -14,7 +14,20 @@ templ Index(interval string) {
 
 		</head>
 		<body hx-ext="sse">
-			<h1>System Metrics</h1>
+			<div style="display: flex; justify-content: space-between; align-items: center;">
+				<h1>System Metrics</h1>
+				<div>
+					<label for="interval">Refresh Rate: </label>
+					<select id="interval" name="interval" onchange="window.location.search = 'interval=' + this.value">
+						<option value="100ms" selected?={ interval == "100ms" }>100ms</option>
+						<option value="250ms" selected?={ interval == "250ms" }>250ms</option>
+						<option value="500ms" selected?={ interval == "500ms" }>500ms</option>
+						<option value="1s" selected?={ interval == "1s" }>1s</option>
+						<option value="3s" selected?={ interval == "3s" }>3s</option>
+						<option value="5s" selected?={ interval == "5s" }>5s</option>
+					</select>
+				</div>
+			</div>
 			<div id="metrics-container" sse-connect={ fmt.Sprintf("/api/metrics/sse?interval=%s", interval) } sse-swap="metrics">
 				<div>Loading metrics...</div>
 			</div>

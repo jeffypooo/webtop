@@ -31,12 +31,14 @@ func main() {
 }
 
 func rootHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html")
-	// Read interval from query parameter, default to "1s" if not provided
-	interval := r.URL.Query().Get("interval")
-	if interval == "" {
-		interval = "1s"
+	if !r.URL.Query().Has("interval") {
+		http.Redirect(w, r, "/?interval=1s", http.StatusFound)
+		return
 	}
+
+	w.Header().Set("Content-Type", "text/html")
+	// Read interval from query parameter
+	interval := r.URL.Query().Get("interval")
 	web.Index(interval).Render(r.Context(), w)
 }
 
