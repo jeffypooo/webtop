@@ -34,17 +34,25 @@ func main() {
 
 func rootHandler(w http.ResponseWriter, r *http.Request) {
 	if !r.URL.Query().Has("interval") {
-		http.Redirect(w, r, "/?interval=1s", http.StatusFound)
+		limitParam := ""
+		if r.URL.Query().Has("limit") {
+			limitParam = "&limit=" + r.URL.Query().Get("limit")
+		}
+		http.Redirect(w, r, "/?interval=1s"+limitParam, http.StatusFound)
 		return
 	}
 
 	w.Header().Set("Content-Type", "text/html")
 	// Read interval from query parameter
 	interval := r.URL.Query().Get("interval")
-	web.Index(interval).Render(r.Context(), w)
+	limit := r.URL.Query().Get("limit")
+	if limit == "" {
+		limit = "10"
+	}
+	web.Index(interval, limit).Render(r.Context(), w)
 }
 
-func getMetrics(procCache map[int32]*process.Process) (metrics.Metrics, error) {
+func getMetrics(procCache map[int32]*process.Process, limit int) (metrics.Metrics, error) {
 	cpuUsage, err := cpu.Percent(0, false)
 	if err != nil {
 		return metrics.Metrics{}, fmt.Errorf("error getting CPU usage: %w", err)
@@ -108,9 +116,9 @@ func getMetrics(procCache map[int32]*process.Process) (metrics.Metrics, error) {
 		return processes[i].CpuPct > processes[j].CpuPct
 	})
 
-	// Top 10
-	if len(processes) > 10 {
-		processes = processes[:10]
+	// Top N
+	if len(processes) > limit {
+		processes = processes[:limit]
 	}
 
 	return metrics.Metrics{
@@ -141,6 +149,16 @@ func apiMetricsSSEHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Parse limit from query parameter
+	limitStr := r.URL.Query().Get("limit")
+	if limitStr == "" {
+		limitStr = "10"
+	}
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil {
+		limit = 10
+	}
+
 	// Set headers for SSE
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -169,7 +187,7 @@ func apiMetricsSSEHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Send initial metrics
 	fmt.Println("Sending initial metrics")
-	sendMetricsUpdate(ctx, w, flusher, procCache)
+	sendMetricsUpdate(ctx, w, flusher, procCache, limit)
 
 	// Stream metrics at the specified interval
 	for {
@@ -179,13 +197,13 @@ func apiMetricsSSEHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-ticker.C:
 			fmt.Println("Sending metrics update")
-			sendMetricsUpdate(ctx, w, flusher, procCache)
+			sendMetricsUpdate(ctx, w, flusher, procCache, limit)
 		}
 	}
 }
 
-func sendMetricsUpdate(ctx context.Context, w io.Writer, flusher http.Flusher, procCache map[int32]*process.Process) {
-	m, err := getMetrics(procCache)
+func sendMetricsUpdate(ctx context.Context, w io.Writer, flusher http.Flusher, procCache map[int32]*process.Process, limit int) {
+	m, err := getMetrics(procCache, limit)
 	if err != nil {
 		fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
 		flusher.Flush()
