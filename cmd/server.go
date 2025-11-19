@@ -14,7 +14,9 @@ import (
 	"github.com/jeffypooo/webtop/internal/metrics"
 	"github.com/jeffypooo/webtop/internal/web"
 	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/mem"
+	"github.com/shirou/gopsutil/v4/net"
 	"github.com/shirou/gopsutil/v4/process"
 )
 
@@ -52,20 +54,43 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	web.Index(interval, limit).Render(r.Context(), w)
 }
 
-func getMetrics(procCache map[int32]*process.Process, limit int) (metrics.Metrics, error) {
+func getMetrics(procCache map[int32]*process.Process, lastNetStats *net.IOCountersStat, lastNetTime time.Time, limit int) (metrics.Metrics, *net.IOCountersStat, time.Time, error) {
 	cpuUsage, err := cpu.Percent(0, false)
 	if err != nil {
-		return metrics.Metrics{}, fmt.Errorf("error getting CPU usage: %w", err)
+		return metrics.Metrics{}, nil, time.Time{}, fmt.Errorf("error getting CPU usage: %w", err)
 	}
 	memUsage, err := mem.VirtualMemory()
 	if err != nil {
-		return metrics.Metrics{}, fmt.Errorf("error getting memory usage: %w", err)
+		return metrics.Metrics{}, nil, time.Time{}, fmt.Errorf("error getting memory usage: %w", err)
+	}
+
+	// Disk usage
+	diskUsage, err := disk.Usage("/")
+	if err != nil {
+		return metrics.Metrics{}, nil, time.Time{}, fmt.Errorf("error getting disk usage: %w", err)
+	}
+
+	// Network usage
+	netStats, err := net.IOCounters(false) // false = aggregated
+	if err != nil {
+		return metrics.Metrics{}, nil, time.Time{}, fmt.Errorf("error getting network usage: %w", err)
+	}
+	currentNetStats := &netStats[0]
+	currentTime := time.Now()
+
+	var txRate, rxRate uint64
+	if lastNetStats != nil {
+		duration := currentTime.Sub(lastNetTime).Seconds()
+		if duration > 0 {
+			txRate = uint64(float64(currentNetStats.BytesSent-lastNetStats.BytesSent) / duration)
+			rxRate = uint64(float64(currentNetStats.BytesRecv-lastNetStats.BytesRecv) / duration)
+		}
 	}
 
 	// Process metrics
 	procs, err := process.Processes()
 	if err != nil {
-		return metrics.Metrics{}, fmt.Errorf("error getting processes: %w", err)
+		return metrics.Metrics{}, nil, time.Time{}, fmt.Errorf("error getting processes: %w", err)
 	}
 
 	currentPids := make(map[int32]bool)
@@ -131,8 +156,21 @@ func getMetrics(procCache map[int32]*process.Process, limit int) (metrics.Metric
 			Total:    memUsage.Total,
 			UsagePct: float64(memUsage.Used) / float64(memUsage.Total) * 100,
 		},
+		NetUsage: metrics.NetUsage{
+			BytesSent: currentNetStats.BytesSent,
+			BytesRecv: currentNetStats.BytesRecv,
+			TxRate:    txRate,
+			RxRate:    rxRate,
+		},
+		DiskUsage: metrics.DiskUsage{
+			Path:        diskUsage.Path,
+			Total:       diskUsage.Total,
+			Free:        diskUsage.Free,
+			Used:        diskUsage.Used,
+			UsedPercent: diskUsage.UsedPercent,
+		},
 		Processes: processes,
-	}, nil
+	}, currentNetStats, currentTime, nil
 }
 
 func apiMetricsSSEHandler(w http.ResponseWriter, r *http.Request) {
@@ -184,39 +222,65 @@ func apiMetricsSSEHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	procCache := make(map[int32]*process.Process)
+	var lastNetStats *net.IOCountersStat
+	var lastNetTime time.Time
 
 	// Send initial metrics
 	fmt.Println("Sending initial metrics")
-	sendMetricsUpdate(ctx, w, flusher, procCache, limit)
+	lastNetStats, lastNetTime, err = sendMetricsUpdate(ctx, w, flusher, procCache, lastNetStats, lastNetTime, limit)
+	if err != nil {
+		fmt.Printf("Error sending initial metrics: %v\n", err)
+		return
+	}
 
 	// Stream metrics at the specified interval
 	for {
 		select {
 		case <-ctx.Done():
-			// Client disconnected
+			fmt.Println("Client disconnected (context done)")
 			return
 		case <-ticker.C:
+			if ctx.Err() != nil {
+				fmt.Println("Client disconnected (context done in loop)")
+				return
+			}
 			fmt.Println("Sending metrics update")
-			sendMetricsUpdate(ctx, w, flusher, procCache, limit)
+			lastNetStats, lastNetTime, err = sendMetricsUpdate(ctx, w, flusher, procCache, lastNetStats, lastNetTime, limit)
+			if err != nil {
+				fmt.Printf("Error sending metrics update: %v\n", err)
+				return
+			}
 		}
 	}
 }
 
-func sendMetricsUpdate(ctx context.Context, w io.Writer, flusher http.Flusher, procCache map[int32]*process.Process, limit int) {
-	m, err := getMetrics(procCache, limit)
+func sendMetricsUpdate(ctx context.Context, w io.Writer, flusher http.Flusher, procCache map[int32]*process.Process, lastNetStats *net.IOCountersStat, lastNetTime time.Time, limit int) (*net.IOCountersStat, time.Time, error) {
+	m, newNetStats, newNetTime, err := getMetrics(procCache, lastNetStats, lastNetTime, limit)
 	if err != nil {
-		fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
+		_, writeErr := fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
+		if writeErr != nil {
+			return lastNetStats, lastNetTime, writeErr
+		}
 		flusher.Flush()
-		return
+		return lastNetStats, lastNetTime, nil
 	}
 
 	// Render metrics HTML
 	var buf strings.Builder
 	web.MetricsDisplay(m).Render(ctx, &buf)
-	htmlContent := buf.String()
-	fmt.Fprintf(w, "event: metrics\ndata: %s\n\n", htmlContent)
+
+	if ctx.Err() != nil {
+		return lastNetStats, lastNetTime, ctx.Err()
+	}
+
+	htmlContent := strings.ReplaceAll(buf.String(), "\n", " ")
+	_, writeErr := fmt.Fprintf(w, "event: metrics\ndata: %s\n\n", htmlContent)
+	if writeErr != nil {
+		return newNetStats, newNetTime, writeErr
+	}
 
 	flusher.Flush()
+	return newNetStats, newNetTime, nil
 }
 
 func parseInterval(intervalStr string) (time.Duration, error) {
