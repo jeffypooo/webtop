@@ -5,7 +5,7 @@ import (
 	"github.com/jeffypooo/webtop/internal/metrics"
 )
 
-templ Index(interval string, limit string) {
+templ Index(params metrics.MetricsParams) {
 	<html>
 		<head>
 			<title>Metrics Dashboard</title>
@@ -112,109 +112,128 @@ templ Index(interval string, limit string) {
                 }
             </style>
 		</head>
-		<body hx-ext="sse">
-			<div style="display: flex; justify-content: space-between; align-items: center;">
-				<h1>System Metrics</h1>
-				<div style="display: flex; gap: 15px;">
+		<body hx-ext="sse" >
+			<div sse-connect={ fmt.Sprintf("/api/metrics/sse?interval=%s&limit=%d&proc_sort=%s&proc_sort_direction=%s", params.Interval.String(), params.ProcLimit, params.ProcSort, params.ProcSortDirection) }>
+				<div style="display: flex; justify-content: space-between; align-items: center;">
+					<h1>System Metrics</h1>
 					<div>
 						<label for="interval">Refresh Rate: </label>
-						<select id="interval" name="interval" hx-get="/" hx-target="body" hx-push-url="true" hx-include="[name='limit']">
-							<option value="100ms" selected?={ interval == "100ms" }>100ms</option>
-							<option value="250ms" selected?={ interval == "250ms" }>250ms</option>
-							<option value="500ms" selected?={ interval == "500ms" }>500ms</option>
-							<option value="1s" selected?={ interval == "1s" }>1s</option>
-							<option value="3s" selected?={ interval == "3s" }>3s</option>
-							<option value="5s" selected?={ interval == "5s" }>5s</option>
-						</select>
-					</div>
-					<div>
-						<label for="limit">Process Count: </label>
-						<select id="limit" name="limit" hx-get="/" hx-target="body" hx-push-url="true" hx-include="[name='interval']">
-							<option value="5" selected?={ limit == "5" }>5</option>
-							<option value="10" selected?={ limit == "10" || limit == "" }>10</option>
-							<option value="20" selected?={ limit == "20" }>20</option>
-							<option value="50" selected?={ limit == "50" }>50</option>
+						<select id="interval" name="interval" hx-get="/" hx-target="body" hx-push-url="true" hx-include="[name='limit'], [name='proc_sort'], [name='proc_sort_direction']">
+							<option value="100ms" selected?={ params.Interval.Milliseconds() == 100 }>100ms</option>
+							<option value="250ms" selected?={ params.Interval.Milliseconds() == 250 }>250ms</option>
+							<option value="500ms" selected?={ params.Interval.Milliseconds() == 500 }>500ms</option>
+							<option value="1s" selected?={ params.Interval.Milliseconds() == 1000 }>1s</option>
+							<option value="3s" selected?={ params.Interval.Milliseconds() == 3000 }>3s</option>
+							<option value="5s" selected?={ params.Interval.Milliseconds() == 5000 }>5s</option>
 						</select>
 					</div>
 				</div>
-			</div>
-			<div id="metrics-container" sse-connect={ fmt.Sprintf("/api/metrics/sse?interval=%s&limit=%s", interval, limit) } sse-swap="metrics">
-				<div>Loading metrics...</div>
+				<div id="metrics-container"  sse-swap="metrics">
+					<div>Loading metrics...</div>
+				</div>
+				<div style="display: flex; justify-content: space-between; align-items: center;">
+					<h1>Processes</h1>
+					<div>
+						<label for="limit">Show: </label>
+						<select id="limit" name="limit" hx-get="/" hx-target="body" hx-push-url="true" hx-include="[name='interval'], [name='proc_sort'], [name='proc_sort_direction']">
+							<option value="5" selected?={ params.ProcLimit == 5 }>5</option>
+							<option value="10" selected?={ params.ProcLimit == 10 }>10</option>
+							<option value="20" selected?={ params.ProcLimit == 20 }>20</option>
+							<option value="50" selected?={ params.ProcLimit == 50 }>50</option>
+						</select>
+						<label for="proc_sort">Sort by: </label>
+						<select id="proc_sort" name="proc_sort" hx-get="/" hx-target="body" hx-push-url="true" hx-include="[name='interval'], [name='limit'], [name='proc_sort_direction']">
+							<option value="cpu" selected?={ params.ProcSort == "cpu" }>CPU</option>
+							<option value="mem" selected?={ params.ProcSort == "mem" }>Memory</option>
+							<option value="pid" selected?={ params.ProcSort == "pid" }>PID</option>
+							<option value="name" selected?={ params.ProcSort == "name" }>Name</option>
+						</select>
+						<label for="proc_sort_direction">Sort direction: </label>
+						<select id="proc_sort_direction" name="proc_sort_direction" hx-get="/" hx-target="body" hx-push-url="true" hx-include="[name='interval'], [name='limit'], [name='proc_sort']">
+							<option value="asc" selected?={ params.ProcSortDirection == "asc" }>Asc</option>
+							<option value="desc" selected?={ params.ProcSortDirection == "desc" }>Desc</option>
+						</select>
+					</div>
+				</div>
+				<div id="process-list-container" sse-swap="processes">
+					<div>Loading processes...</div>
+				</div>
 			</div>
 		</body>
 	</html>
 }
 
-templ MetricsDisplay(m metrics.Metrics) {
-	<div>
-		<div class="metrics-grid">
-			<div class="card">
-				<h2>CPU Usage</h2>
-				<div class="stat-row">
-					<span class="stat-label">Usage:</span>
-					<span class="stat-value">{ fmt.Sprintf("%.2f", m.CpuUsage.UsagePct) }%</span>
-				</div>
-			</div>
-			<div class="card">
-				<h2>Memory Usage</h2>
-				<div class="stat-row">
-					<span class="stat-label">Used:</span>
-					<span class="stat-value">{ formatBytes(m.MemUsage.Used) }</span>
-				</div>
-				<div class="stat-row">
-					<span class="stat-label">Free:</span>
-					<span class="stat-value">{ formatBytes(m.MemUsage.Free) }</span>
-				</div>
-				<div class="stat-row">
-					<span class="stat-label">Total:</span>
-					<span class="stat-value">{ formatBytes(m.MemUsage.Total) }</span>
-				</div>
-				<div class="stat-row">
-					<span class="stat-label">Usage:</span>
-					<span class="stat-value">{ fmt.Sprintf("%.2f", m.MemUsage.UsagePct) }%</span>
-				</div>
-			</div>
-			<div class="card">
-				<h2>Network Usage</h2>
-				<div class="stat-row">
-					<span class="stat-label">Upload:</span>
-					<span class="stat-value">{ formatBytes(m.NetUsage.TxRate) }/s</span>
-				</div>
-				<div class="stat-row">
-					<span class="stat-label">Download:</span>
-					<span class="stat-value">{ formatBytes(m.NetUsage.RxRate) }/s</span>
-				</div>
-				<div class="stat-row">
-					<span class="stat-label">Sent:</span>
-					<span class="stat-value">{ formatBytes(m.NetUsage.BytesSent) }</span>
-				</div>
-				<div class="stat-row">
-					<span class="stat-label">Received:</span>
-					<span class="stat-value">{ formatBytes(m.NetUsage.BytesRecv) }</span>
-				</div>
-			</div>
-			<div class="card">
-				<h2>Disk Usage ({ m.DiskUsage.Path })</h2>
-				<div class="stat-row">
-					<span class="stat-label">Used:</span>
-					<span class="stat-value">{ formatBytes(m.DiskUsage.Used) }</span>
-				</div>
-				<div class="stat-row">
-					<span class="stat-label">Free:</span>
-					<span class="stat-value">{ formatBytes(m.DiskUsage.Free) }</span>
-				</div>
-				<div class="stat-row">
-					<span class="stat-label">Total:</span>
-					<span class="stat-value">{ formatBytes(m.DiskUsage.Total) }</span>
-				</div>
-				<div class="stat-row">
-					<span class="stat-label">Usage:</span>
-					<span class="stat-value">{ fmt.Sprintf("%.2f", m.DiskUsage.UsedPercent) }%</span>
-				</div>
+templ MetricsCards(m metrics.Metrics) {
+	<div class="metrics-grid">
+		<div class="card">
+			<h2>CPU Usage</h2>
+			<div class="stat-row">
+				<span class="stat-label">Usage:</span>
+				<span class="stat-value">{ fmt.Sprintf("%.2f", m.CpuUsage.UsagePct) }%</span>
 			</div>
 		</div>
+		<div class="card">
+			<h2>Memory Usage</h2>
+			<div class="stat-row">
+				<span class="stat-label">Used:</span>
+				<span class="stat-value">{ formatBytes(m.MemUsage.Used) }</span>
+			</div>
+			<div class="stat-row">
+				<span class="stat-label">Free:</span>
+				<span class="stat-value">{ formatBytes(m.MemUsage.Free) }</span>
+			</div>
+			<div class="stat-row">
+				<span class="stat-label">Total:</span>
+				<span class="stat-value">{ formatBytes(m.MemUsage.Total) }</span>
+			</div>
+			<div class="stat-row">
+				<span class="stat-label">Usage:</span>
+				<span class="stat-value">{ fmt.Sprintf("%.2f", m.MemUsage.UsagePct) }%</span>
+			</div>
+		</div>
+		<div class="card">
+			<h2>Network Usage</h2>
+			<div class="stat-row">
+				<span class="stat-label">Upload:</span>
+				<span class="stat-value">{ formatBytes(m.NetUsage.TxRate) }/s</span>
+			</div>
+			<div class="stat-row">
+				<span class="stat-label">Download:</span>
+				<span class="stat-value">{ formatBytes(m.NetUsage.RxRate) }/s</span>
+			</div>
+			<div class="stat-row">
+				<span class="stat-label">Sent:</span>
+				<span class="stat-value">{ formatBytes(m.NetUsage.BytesSent) }</span>
+			</div>
+			<div class="stat-row">
+				<span class="stat-label">Received:</span>
+				<span class="stat-value">{ formatBytes(m.NetUsage.BytesRecv) }</span>
+			</div>
+		</div>
+		<div class="card">
+			<h2>Disk Usage ({ m.DiskUsage.Path })</h2>
+			<div class="stat-row">
+				<span class="stat-label">Used:</span>
+				<span class="stat-value">{ formatBytes(m.DiskUsage.Used) }</span>
+			</div>
+			<div class="stat-row">
+				<span class="stat-label">Free:</span>
+				<span class="stat-value">{ formatBytes(m.DiskUsage.Free) }</span>
+			</div>
+			<div class="stat-row">
+				<span class="stat-label">Total:</span>
+				<span class="stat-value">{ formatBytes(m.DiskUsage.Total) }</span>
+			</div>
+			<div class="stat-row">
+				<span class="stat-label">Usage:</span>
+				<span class="stat-value">{ fmt.Sprintf("%.2f", m.DiskUsage.UsedPercent) }%</span>
+			</div>
+		</div>
+	</div>
+}
 
-		<h2>Top Processes</h2>
+templ ProcessList(processes []metrics.Process, params metrics.MetricsParams) {
+	<div>
 		<table>
 			<thead>
 				<tr>
@@ -225,7 +244,7 @@ templ MetricsDisplay(m metrics.Metrics) {
 				</tr>
 			</thead>
 			<tbody>
-				for _, p := range m.Processes {
+				for _, p := range processes {
 					<tr>
 						<td>{ fmt.Sprintf("%d", p.Pid) }</td>
 						<td>{ p.Name }</td>
@@ -235,5 +254,12 @@ templ MetricsDisplay(m metrics.Metrics) {
 				}
 			</tbody>
 		</table>
+	</div>
+}
+
+templ MetricsDisplay(m metrics.Metrics, params metrics.MetricsParams) {
+	<div>
+		@MetricsCards(m)
+		@ProcessList(m.Processes, params)
 	</div>
 }
