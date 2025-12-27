@@ -3,13 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/http"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/labstack/echo/v4"
+	"github.com/labstack/gommon/log"
 
 	"github.com/jeffypooo/webtop/internal/metrics"
 	"github.com/jeffypooo/webtop/internal/web"
@@ -21,37 +22,153 @@ import (
 )
 
 func main() {
-	// TODO: implement real server
+	e := echo.New()
+	e.Logger.SetLevel(log.DEBUG)
+	e.GET("/", rootHandler)
+	e.GET("/api/metrics/sse", apiMetricsSSEHandler)
+	e.Logger.Fatal(e.Start(":8080"))
 
-	// for now, just spin up a hello world server
-	http.HandleFunc("/", rootHandler)
-	http.HandleFunc("/api/metrics/sse", apiMetricsSSEHandler)
-	fmt.Println("Starting server on port 8080")
-	err := http.ListenAndServe(":8080", nil)
+}
+
+func rootHandler(c echo.Context) error {
+	intervalParam := c.QueryParam("interval")
+	if intervalParam == "" {
+		intervalParam = "1s"
+	}
+	limitParam := c.QueryParam("limit")
+	if limitParam == "" {
+		limitParam = "10"
+	}
+
+	web.Index(intervalParam, limitParam).Render(c.Request().Context(), c.Response().Writer)
+	return nil
+}
+
+func apiMetricsSSEHandler(c echo.Context) error {
+	c.Logger().Info("SSE request received", "remote_addr", c.Request().RemoteAddr, "method", c.Request().Method, "url", c.Request().URL.String())
+
+	interval, err := parseInterval(c)
 	if err != nil {
-		fmt.Println("Error starting server:", err)
-		os.Exit(1)
+		return c.String(http.StatusBadRequest, fmt.Sprintf("Invalid interval: %v", err))
+	}
+
+	limit, err := strconv.Atoi(c.QueryParam("limit"))
+	if err != nil {
+		limit = 10
+	}
+
+	// Set headers for SSE
+	resp := c.Response()
+	resp.Header().Set("Content-Type", "text/event-stream")
+	resp.Header().Set("Cache-Control", "no-cache")
+	resp.Header().Set("Connection", "keep-alive")
+	resp.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// Send initial connection message
+	fmt.Fprintf(resp.Writer, "event: connected\ndata: Connected to metrics stream\n\n")
+	resp.Flush()
+
+	// Create a ticker for the interval
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	// Handle client disconnect
+	ctx := c.Request().Context()
+
+	procCache := make(map[int32]*process.Process)
+	var lastNetStats *net.IOCountersStat
+	var lastNetTime time.Time
+
+	// Send initial metrics
+	// fmt.Println("Sending initial metrics")
+	c.Logger().Info("Sending initial metrics")
+	lastNetStats, lastNetTime, err = sendMetricsUpdate(ctx, resp, procCache, lastNetStats, lastNetTime, limit)
+	if err != nil {
+		fmt.Printf("Error sending initial metrics: %v\n", err)
+		return c.String(http.StatusInternalServerError, fmt.Sprintf("Error sending initial metrics: %v", err))
+	}
+
+	// Stream metrics at the specified interval
+	for {
+		select {
+		case <-ctx.Done():
+			c.Logger().Info("Client disconnected (context done)")
+			return nil
+		case <-ticker.C:
+			if ctx.Err() != nil {
+				c.Logger().Info("Client disconnected (context done in loop)")
+				return nil
+			}
+			c.Logger().Info("Sending metrics update")
+			lastNetStats, lastNetTime, err = sendMetricsUpdate(ctx, resp, procCache, lastNetStats, lastNetTime, limit)
+			if err != nil {
+				c.Logger().Error("Error sending metrics update", "error", err)
+				return c.String(http.StatusInternalServerError, fmt.Sprintf("Error sending metrics update: %v", err))
+			}
+		}
 	}
 }
 
-func rootHandler(w http.ResponseWriter, r *http.Request) {
-	if !r.URL.Query().Has("interval") {
-		limitParam := ""
-		if r.URL.Query().Has("limit") {
-			limitParam = "&limit=" + r.URL.Query().Get("limit")
+func sendMetricsUpdate(ctx context.Context, resp *echo.Response, procCache map[int32]*process.Process, lastNetStats *net.IOCountersStat, lastNetTime time.Time, limit int) (*net.IOCountersStat, time.Time, error) {
+	m, newNetStats, newNetTime, err := getMetrics(procCache, lastNetStats, lastNetTime, limit)
+	if err != nil {
+		_, writeErr := fmt.Fprintf(resp.Writer, "event: error\ndata: %s\n\n", err.Error())
+		if writeErr != nil {
+			return lastNetStats, lastNetTime, writeErr
 		}
-		http.Redirect(w, r, "/?interval=1s"+limitParam, http.StatusFound)
-		return
+		resp.Flush()
+		return lastNetStats, lastNetTime, nil
 	}
 
-	w.Header().Set("Content-Type", "text/html")
-	// Read interval from query parameter
-	interval := r.URL.Query().Get("interval")
-	limit := r.URL.Query().Get("limit")
-	if limit == "" {
-		limit = "10"
+	// Render metrics HTML
+	var buf strings.Builder
+	web.MetricsDisplay(m).Render(ctx, &buf)
+
+	if ctx.Err() != nil {
+		return lastNetStats, lastNetTime, ctx.Err()
 	}
-	web.Index(interval, limit).Render(r.Context(), w)
+
+	htmlContent := strings.ReplaceAll(buf.String(), "\n", " ")
+	_, writeErr := fmt.Fprintf(resp.Writer, "event: metrics\ndata: %s\n\n", htmlContent)
+	if writeErr != nil {
+		return newNetStats, newNetTime, writeErr
+	}
+
+	resp.Flush()
+	return newNetStats, newNetTime, nil
+}
+
+func parseInterval(c echo.Context) (time.Duration, error) {
+	intervalStr := c.QueryParam("interval")
+	if intervalStr == "" {
+		return time.Duration(1 * time.Second), nil
+	}
+	// Remove "ms" suffix and convert to milliseconds
+	if strings.HasSuffix(intervalStr, "ms") {
+		msStr := strings.TrimSuffix(intervalStr, "ms")
+		ms, err := strconv.Atoi(msStr)
+		if err != nil {
+			return 0, err
+		}
+		return time.Duration(ms) * time.Millisecond, nil
+	}
+
+	// Remove "s" suffix and convert to seconds
+	if strings.HasSuffix(intervalStr, "s") {
+		sStr := strings.TrimSuffix(intervalStr, "s")
+		seconds, err := strconv.ParseFloat(sStr, 64)
+		if err != nil {
+			return 0, err
+		}
+		return time.Duration(seconds * float64(time.Second)), nil
+	}
+
+	// Default to seconds if no suffix
+	seconds, err := strconv.ParseFloat(intervalStr, 64)
+	if err != nil {
+		return 0, err
+	}
+	return time.Duration(seconds * float64(time.Second)), nil
 }
 
 func getMetrics(procCache map[int32]*process.Process, lastNetStats *net.IOCountersStat, lastNetTime time.Time, limit int) (metrics.Metrics, *net.IOCountersStat, time.Time, error) {
@@ -171,143 +288,4 @@ func getMetrics(procCache map[int32]*process.Process, lastNetStats *net.IOCounte
 		},
 		Processes: processes,
 	}, currentNetStats, currentTime, nil
-}
-
-func apiMetricsSSEHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Printf("SSE request received from %s: %s %s\n", r.RemoteAddr, r.Method, r.URL.String())
-	// Parse interval from query parameter
-	intervalStr := r.URL.Query().Get("interval")
-	if intervalStr == "" {
-		intervalStr = "1s"
-	}
-
-	interval, err := parseInterval(intervalStr)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Invalid interval: %v", err), http.StatusBadRequest)
-		return
-	}
-
-	// Parse limit from query parameter
-	limitStr := r.URL.Query().Get("limit")
-	if limitStr == "" {
-		limitStr = "10"
-	}
-	limit, err := strconv.Atoi(limitStr)
-	if err != nil {
-		limit = 10
-	}
-
-	// Set headers for SSE
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-
-	// Create a flusher to send data immediately
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
-		return
-	}
-
-	// Send initial connection message
-	fmt.Fprintf(w, "event: connected\ndata: Connected to metrics stream\n\n")
-	flusher.Flush()
-
-	// Create a ticker for the interval
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	// Handle client disconnect
-	ctx := r.Context()
-
-	procCache := make(map[int32]*process.Process)
-	var lastNetStats *net.IOCountersStat
-	var lastNetTime time.Time
-
-	// Send initial metrics
-	fmt.Println("Sending initial metrics")
-	lastNetStats, lastNetTime, err = sendMetricsUpdate(ctx, w, flusher, procCache, lastNetStats, lastNetTime, limit)
-	if err != nil {
-		fmt.Printf("Error sending initial metrics: %v\n", err)
-		return
-	}
-
-	// Stream metrics at the specified interval
-	for {
-		select {
-		case <-ctx.Done():
-			fmt.Println("Client disconnected (context done)")
-			return
-		case <-ticker.C:
-			if ctx.Err() != nil {
-				fmt.Println("Client disconnected (context done in loop)")
-				return
-			}
-			fmt.Println("Sending metrics update")
-			lastNetStats, lastNetTime, err = sendMetricsUpdate(ctx, w, flusher, procCache, lastNetStats, lastNetTime, limit)
-			if err != nil {
-				fmt.Printf("Error sending metrics update: %v\n", err)
-				return
-			}
-		}
-	}
-}
-
-func sendMetricsUpdate(ctx context.Context, w io.Writer, flusher http.Flusher, procCache map[int32]*process.Process, lastNetStats *net.IOCountersStat, lastNetTime time.Time, limit int) (*net.IOCountersStat, time.Time, error) {
-	m, newNetStats, newNetTime, err := getMetrics(procCache, lastNetStats, lastNetTime, limit)
-	if err != nil {
-		_, writeErr := fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
-		if writeErr != nil {
-			return lastNetStats, lastNetTime, writeErr
-		}
-		flusher.Flush()
-		return lastNetStats, lastNetTime, nil
-	}
-
-	// Render metrics HTML
-	var buf strings.Builder
-	web.MetricsDisplay(m).Render(ctx, &buf)
-
-	if ctx.Err() != nil {
-		return lastNetStats, lastNetTime, ctx.Err()
-	}
-
-	htmlContent := strings.ReplaceAll(buf.String(), "\n", " ")
-	_, writeErr := fmt.Fprintf(w, "event: metrics\ndata: %s\n\n", htmlContent)
-	if writeErr != nil {
-		return newNetStats, newNetTime, writeErr
-	}
-
-	flusher.Flush()
-	return newNetStats, newNetTime, nil
-}
-
-func parseInterval(intervalStr string) (time.Duration, error) {
-	// Remove "ms" suffix and convert to milliseconds
-	if strings.HasSuffix(intervalStr, "ms") {
-		msStr := strings.TrimSuffix(intervalStr, "ms")
-		ms, err := strconv.Atoi(msStr)
-		if err != nil {
-			return 0, err
-		}
-		return time.Duration(ms) * time.Millisecond, nil
-	}
-
-	// Remove "s" suffix and convert to seconds
-	if strings.HasSuffix(intervalStr, "s") {
-		sStr := strings.TrimSuffix(intervalStr, "s")
-		seconds, err := strconv.ParseFloat(sStr, 64)
-		if err != nil {
-			return 0, err
-		}
-		return time.Duration(seconds * float64(time.Second)), nil
-	}
-
-	// Default to seconds if no suffix
-	seconds, err := strconv.ParseFloat(intervalStr, 64)
-	if err != nil {
-		return 0, err
-	}
-	return time.Duration(seconds * float64(time.Second)), nil
 }
