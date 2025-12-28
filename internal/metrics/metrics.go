@@ -39,7 +39,8 @@ type MetricsParams struct {
 }
 
 type CpuUsage struct {
-	UsagePct float64 `json:"usage"`
+	UsagePct    float64 `json:"usage"`
+	TempCelsius float64 `json:"temp_celsius"`
 }
 
 type MemUsage struct {
@@ -101,12 +102,15 @@ func (mc *MetricsCollector) GetMetrics(
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
 
+	var tempCelsius float64
 	sensors, err := sensors.SensorsTemperatures()
 	if err != nil {
 		return Metrics{}, fmt.Errorf("error getting sensors temperatures: %w", err)
 	}
 	for _, sensor := range sensors {
-		fmt.Printf("Sensor: %+v\n", sensor)
+		if sensor.SensorKey == "cpu_thermal" {
+			tempCelsius = sensor.Temperature
+		}
 	}
 
 	cpuUsage, err := cpu.Percent(0, false)
@@ -233,7 +237,8 @@ func (mc *MetricsCollector) GetMetrics(
 
 	return Metrics{
 		CpuUsage: CpuUsage{
-			UsagePct: cpuUsage[0],
+			UsagePct:    cpuUsage[0],
+			TempCelsius: tempCelsius,
 		},
 		MemUsage: MemUsage{
 			Used:     memUsage.Used,
