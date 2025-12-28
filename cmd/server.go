@@ -13,8 +13,6 @@ import (
 
 	"github.com/jeffypooo/webtop/internal/metrics"
 	"github.com/jeffypooo/webtop/internal/web"
-	"github.com/shirou/gopsutil/v4/net"
-	"github.com/shirou/gopsutil/v4/process"
 )
 
 func main() {
@@ -54,42 +52,19 @@ func apiMetricsSSEHandler(c echo.Context) error {
 	fmt.Fprintf(resp.Writer, "event: connected\ndata: Connected to metrics stream\n\n")
 	resp.Flush()
 
-	// Create a ticker for the interval
-	ticker := time.NewTicker(params.Interval)
-	defer ticker.Stop()
-
 	// Handle client disconnect
 	ctx := c.Request().Context()
 
-	procCache := make(map[int32]*process.Process)
-	var lastNetStats *net.IOCountersStat
-	var lastNetTime time.Time
-
-	// Send initial metrics
-	// fmt.Println("Sending initial metrics")
-	c.Logger().Info("Sending initial metrics")
-	lastNetStats, lastNetTime, err = sendMetricsUpdate(ctx, resp, procCache, lastNetStats, lastNetTime, params)
-	if err != nil {
-		fmt.Printf("Error sending initial metrics: %v\n", err)
-		return c.String(http.StatusInternalServerError, fmt.Sprintf("Error sending initial metrics: %v", err))
-	}
-
-	// Stream metrics at the specified interval
+	mc := metrics.NewMetricsCollector()
+	metricsCh := mc.StreamMetrics(ctx, params)
 	for {
 		select {
 		case <-ctx.Done():
-			c.Logger().Info("Client disconnected (context done)")
-			return nil
-		case <-ticker.C:
-			if ctx.Err() != nil {
-				c.Logger().Info("Client disconnected (context done in loop)")
-				return nil
-			}
-			c.Logger().Info("Sending metrics update")
-			lastNetStats, lastNetTime, err = sendMetricsUpdate(ctx, resp, procCache, lastNetStats, lastNetTime, params)
+			return ctx.Err()
+		case metrics := <-metricsCh:
+			err = sendMetricsUpdate(ctx, resp, params, metrics)
 			if err != nil {
-				c.Logger().Error("Error sending metrics update", "error", err)
-				return c.String(http.StatusInternalServerError, fmt.Sprintf("Error sending metrics update: %v", err))
+				return err
 			}
 		}
 	}
@@ -98,44 +73,32 @@ func apiMetricsSSEHandler(c echo.Context) error {
 func sendMetricsUpdate(
 	ctx context.Context,
 	resp *echo.Response,
-	procCache map[int32]*process.Process,
-	lastNetStats *net.IOCountersStat,
-	lastNetTime time.Time,
 	params metrics.MetricsParams,
-) (*net.IOCountersStat, time.Time, error) {
-	m, newNetStats, newNetTime, err := metrics.GetMetrics(procCache, lastNetStats, lastNetTime, params)
-	if err != nil {
-		_, writeErr := fmt.Fprintf(resp.Writer, "event: error\ndata: %s\n\n", err.Error())
-		if writeErr != nil {
-			return lastNetStats, lastNetTime, writeErr
-		}
-		resp.Flush()
-		return lastNetStats, lastNetTime, nil
-	}
-
+	metrics metrics.Metrics,
+) error {
 	// Render metrics HTML
 	var metricsBuf strings.Builder
-	web.MetricsCards(m).Render(ctx, &metricsBuf)
+	web.MetricsCards(metrics).Render(ctx, &metricsBuf)
 	metricsHtml := strings.ReplaceAll(metricsBuf.String(), "\n", " ")
 	_, writeErr := fmt.Fprintf(resp.Writer, "event: metrics\ndata: %s\n\n", metricsHtml)
 	if writeErr != nil {
-		return newNetStats, lastNetTime, writeErr
+		return writeErr
 	}
 
 	var processesBuf strings.Builder
-	web.ProcessList(m.Processes, params).Render(ctx, &processesBuf)
+	web.ProcessList(metrics.Processes, params).Render(ctx, &processesBuf)
 	processesHtml := strings.ReplaceAll(processesBuf.String(), "\n", " ")
 	_, writeErr = fmt.Fprintf(resp.Writer, "event: processes\ndata: %s\n\n", processesHtml)
 	if writeErr != nil {
-		return newNetStats, lastNetTime, writeErr
+		return writeErr
 	}
 
 	if ctx.Err() != nil {
-		return lastNetStats, lastNetTime, ctx.Err()
+		return ctx.Err()
 	}
 
 	resp.Flush()
-	return newNetStats, newNetTime, nil
+	return nil
 }
 
 func parseMetricsParams(c echo.Context) (metrics.MetricsParams, error) {
