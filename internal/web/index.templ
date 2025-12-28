@@ -171,6 +171,12 @@ templ MetricsCards(m metrics.Metrics) {
 				<span class="stat-label">Usage:</span>
 				<span class="stat-value">{ fmt.Sprintf("%.2f", m.CpuUsage.UsagePct) }%</span>
 			</div>
+			if m.CpuUsage.TempCelsius > float64(-99) {
+				<div class="stat-row">
+					<span class="stat-label">Temperature:</span>
+					<span class="stat-value">{ fmt.Sprintf("%.2f", m.CpuUsage.TempCelsius) }°C</span>
+				</div>
+			}
 		</div>
 		<div class="card">
 			<h2>Memory Usage</h2>

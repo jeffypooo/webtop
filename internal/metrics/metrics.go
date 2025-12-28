@@ -102,7 +102,7 @@ func (mc *MetricsCollector) GetMetrics(
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
 
-	var tempCelsius float64
+	var tempCelsius float64 = -99
 	sensors, err := sensors.SensorsTemperatures()
 	if err != nil {
 		return Metrics{}, fmt.Errorf("error getting sensors temperatures: %w", err)
